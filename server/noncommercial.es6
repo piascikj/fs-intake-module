@@ -1,10 +1,12 @@
 'use strict';
 
 let NoncommercialApplication = require('./models/noncommercial-application.es6');
-let middlelayer = require('./middlelayer-interaction.es6');
+let request = require('request');
+let util = require('./util.es6');
 let validator = require('./validation.es6');
+let vcapServices = require('./vcap-services.es6');
 
-let noncommercialRestHandlers = {};
+let noncommercial = {};
 
 let translateFromClientToDatabase = input => {
   return {
@@ -91,6 +93,64 @@ let translateFromClientToDatabase = input => {
   };
 };
 
+let translateFromIntakeToMiddleLayer = input => {
+  let result = {
+    region: input.region,
+    forest: input.forest,
+    district: input.district,
+    authorizingOfficerName: 'Placeholder', // TODO: Add value when user has authenticated
+    authorizingOfficerTitle: 'Placeholder', // TODO: Add value when user has authenticated
+    applicantInfo: {
+      firstName: input.applicantInfoPrimaryFirstName,
+      lastName: input.applicantInfoPrimaryLastName,
+      dayPhone: {
+        areaCode: input.applicantInfoDayPhoneAreaCode,
+        number: input.applicantInfoDayPhonePrefix + input.applicantInfoDayPhoneNumber,
+        extension: input.applicantInfoDayPhoneExtension || undefined,
+        phoneType: 'standard'
+      },
+      eveningPhone: {
+        areaCode: input.applicantInfoEveningPhoneAreaCode || input.applicantInfoDayPhoneAreaCode,
+        number:
+          input.applicantInfoEveningPhonePrefix + input.applicantInfoEveningPhoneNumber ||
+          input.applicantInfoDayPhonePrefix + input.applicantInfoDayPhoneNumber,
+        extension: input.applicantInfoEveningPhoneExtension || input.applicantInfoDayPhoneExtension || undefined,
+        phoneType: 'standard'
+      },
+      emailAddress: input.applicantInfoEmailAddress,
+      organizationName: input.applicantInfoOrganizationName || undefined,
+      website: input.applicantInfoWebsite || undefined,
+      orgType: input.applicantInfoOrgType
+    },
+    type: input.type,
+    noncommercialFields: {
+      activityDescription: input.noncommercialFieldsActivityDescription,
+      locationDescription: input.noncommercialFieldsLocationDescription,
+      startDateTime: input.noncommercialFieldsStartDateTime,
+      endDateTime: input.noncommercialFieldsEndDateTime,
+      numberParticipants: Number(input.noncommercialFieldsNumberParticipants)
+    }
+  };
+
+  if (input.applicantInfoOrgType === 'Person') {
+    result.applicantInfo.mailingAddress = input.applicantInfoPrimaryMailingAddress;
+    result.applicantInfo.mailingAddress2 = input.applicantInfoPrimaryMailingAddress2 || undefined;
+    result.applicantInfo.mailingCity = input.applicantInfoPrimaryMailingCity;
+    result.applicantInfo.mailingState = input.applicantInfoPrimaryMailingState;
+    result.applicantInfo.mailingZIP = input.applicantInfoPrimaryMailingZIP;
+  }
+
+  if (input.applicantInfoOrgType === 'Corporation') {
+    result.applicantInfo.mailingAddress = input.applicantInfoOrgMailingAddress;
+    result.applicantInfo.mailingAddress2 = input.applicantInfoOrgMailingAddress2 || undefined;
+    result.applicantInfo.mailingCity = input.applicantInfoOrgMailingCity;
+    result.applicantInfo.mailingState = input.applicantInfoOrgMailingState;
+    result.applicantInfo.mailingZIP = input.applicantInfoOrgMailingZIP;
+  }
+
+  return result;
+};
+
 let translateFromDatabaseToClient = input => {
   return {
     applicantInfo: {
@@ -161,7 +221,33 @@ let translateFromDatabaseToClient = input => {
   };
 };
 
-noncommercialRestHandlers.getOne = (req, res) => {
+let acceptNoncommercialPermitApplication = application => {
+  let requestOptions = {
+    url: vcapServices.middleLayerBaseUrl + 'permits/applications/special-uses/noncommercial/',
+    headers: {},
+    json: true,
+    body: translateFromIntakeToMiddleLayer(application)
+  };
+  return new Promise((resolve, reject) => {
+    util
+      .authenticateMiddleLayer()
+      .then(token => {
+        requestOptions.headers['x-access-token'] = token;
+        request.post(requestOptions, (error, response, body) => {
+          if (error || response.statusCode !== 200) {
+            reject(error || response);
+          } else {
+            resolve(body);
+          }
+        });
+      })
+      .catch(error => {
+        reject(error);
+      });
+  });
+};
+
+noncommercial.getOne = (req, res) => {
   NoncommercialApplication.findOne({ where: { app_control_number: req.params.id } })
     .then(app => {
       if (app) {
@@ -176,7 +262,7 @@ noncommercialRestHandlers.getOne = (req, res) => {
 };
 
 // populates an applicationId on the object before return
-noncommercialRestHandlers.create = (req, res) => {
+noncommercial.create = (req, res) => {
   let errorRet = {};
 
   let errorArr = validator.validateNoncommercial(req.body);
@@ -198,19 +284,18 @@ noncommercialRestHandlers.create = (req, res) => {
   }
 };
 
-noncommercialRestHandlers.update = (req, res) => {
-  NoncommercialApplication.findOne({ where: { app_control_number: req.params.id } }).then(app => {
-    if (app) {
-      app.status = req.body.status;
-      if (app.status === 'Accepted') {
-        middlelayer
-          .acceptNoncommercialPermitApplication(app)
+noncommercial.update = (req, res) => {
+  NoncommercialApplication.findOne({ where: { app_control_number: req.params.id } }).then(application => {
+    if (application) {
+      application.status = req.body.status;
+      if (application.status === 'Accepted') {
+        acceptNoncommercialPermitApplication(application)
           .then(response => {
-            app.controlNumber = response.controlNumber;
-            app
+            application.controlNumber = response.controlNumber;
+            application
               .save()
               .then(() => {
-                res.status(200).json(translateFromDatabaseToClient(app));
+                res.status(200).json(translateFromDatabaseToClient(application));
               })
               .catch(error => {
                 res.status(500).json(error);
@@ -220,10 +305,10 @@ noncommercialRestHandlers.update = (req, res) => {
             res.status(500).json(error);
           });
       } else {
-        app
+        application
           .save()
           .then(() => {
-            res.status(200).json(translateFromDatabaseToClient(app));
+            res.status(200).json(translateFromDatabaseToClient(application));
           })
           .catch(error => {
             res.status(500).json(error);
@@ -235,4 +320,4 @@ noncommercialRestHandlers.update = (req, res) => {
   });
 };
 
-module.exports = noncommercialRestHandlers;
+module.exports = noncommercial;

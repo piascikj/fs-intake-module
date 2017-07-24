@@ -2,13 +2,16 @@
 
 let ApplicationFile = require('./models/application-files.es6');
 let AWS = require('aws-sdk');
+let fs = require('fs');
 let multer = require('multer');
 let multerS3 = require('multer-s3');
+let request = require('request');
 let TempOutfitterApplication = require('./models/tempoutfitter-application.es6');
+let util = require('./util.es6');
 let validator = require('./validation.es6');
 let vcapServices = require('./vcap-services.es6');
 
-let tempOutfitterRestHandlers = {};
+let tempOutfitter = {};
 
 let translateFromClientToDatabase = input => {
   return {
@@ -183,6 +186,87 @@ let translateFromDatabaseToClient = input => {
   };
 };
 
+let translateFromIntakeToMiddleLayer = input => {
+  console.log(input);
+  let result = {
+    region: '11',
+    forest: '11',
+    district: '11',
+    authorizingOfficerName: 'Khaleesi',
+    authorizingOfficerTitle: 'Queen of Dragons',
+    applicantInfo: {
+      firstName: 'Grey',
+      lastName: 'Worm',
+      dayPhone: {
+        areaCode: '321',
+        number: '7654321',
+        extension: '2345',
+        phoneType: 'day'
+      },
+      eveningPhone: {
+        areaCode: '123',
+        number: '1234567',
+        extension: '1234',
+        phoneType: 'evening'
+      },
+      emailAddress: 'test@test.com',
+      mailingAddress: '123 Easy Street',
+      mailingAddress2: 'Apt 2',
+      mailingCity: 'Evanston',
+      mailingState: 'IL',
+      mailingZIP: '60201',
+      organizationName: 'My House',
+      website: 'http://website.com',
+      orgType: 'Association'
+    },
+    type: 'tempOutfitters',
+    tempOutfitterFields: {
+      individualIsCitizen: true,
+      smallBusiness: true,
+      activityDescription: 'Fun Activity',
+      advertisingURL: 'http://advertising.com',
+      advertisingDescription: 'Fun Advertising',
+      clientCharges: 'Much value',
+      experienceList: 'Such experience, wow!'
+    }
+  };
+
+  return result;
+};
+
+let acceptTempOutfitterPermitApplication = application => {
+  let requestOptions = {
+    url: vcapServices.middleLayerBaseUrl + 'permits/applications/special-uses/commercial/temp-outfitters/',
+    headers: {},
+    formData: {
+      body: JSON.stringify(translateFromIntakeToMiddleLayer(application)),
+      guideDocumentation: fs.createReadStream('./test.pdf'),
+      acknowledgementOfRiskForm: fs.createReadStream('./test.pdf'),
+      insuranceCertificate: fs.createReadStream('./test.pdf'),
+      goodStandingEvidence: fs.createReadStream('./test.pdf'),
+      operatingPlan: fs.createReadStream('./test.pdf')
+    }
+  };
+
+  return new Promise((resolve, reject) => {
+    util
+      .authenticateMiddleLayer()
+      .then(token => {
+        requestOptions.headers['x-access-token'] = token;
+        request.post(requestOptions, (error, response, body) => {
+          if (error || response.statusCode !== 200) {
+            reject(error || response);
+          } else {
+            resolve(body);
+          }
+        });
+      })
+      .catch(error => {
+        reject(error);
+      });
+  });
+};
+
 // S3 Setup
 
 // Upload to S3
@@ -192,7 +276,7 @@ let s3 = new AWS.S3({
   region: vcapServices.region
 });
 
-tempOutfitterRestHandlers.streamToS3 = multer({
+tempOutfitter.streamToS3 = multer({
   storage: multerS3({
     s3: s3,
     bucket: vcapServices.bucket,
@@ -202,7 +286,7 @@ tempOutfitterRestHandlers.streamToS3 = multer({
   })
 });
 
-tempOutfitterRestHandlers.attachFile = (req, res) => {
+tempOutfitter.attachFile = (req, res) => {
   ApplicationFile.create({
     applicationId: req.body.applicationId,
     // applicationType: req.body.applicationType,
@@ -221,7 +305,7 @@ tempOutfitterRestHandlers.attachFile = (req, res) => {
     });
 };
 
-tempOutfitterRestHandlers.create = (req, res) => {
+tempOutfitter.create = (req, res) => {
   let errorRet = {};
   let errorArr = validator.validateTempOutfitter(req.body);
   if (errorArr.length > 0) {
@@ -240,7 +324,7 @@ tempOutfitterRestHandlers.create = (req, res) => {
   }
 };
 
-tempOutfitterRestHandlers.getOne = (req, res) => {
+tempOutfitter.getOne = (req, res) => {
   TempOutfitterApplication.findOne({ where: { app_control_number: req.params.id } })
     .then(app => {
       if (app) {
@@ -254,4 +338,40 @@ tempOutfitterRestHandlers.getOne = (req, res) => {
     });
 };
 
-module.exports = tempOutfitterRestHandlers;
+tempOutfitter.update = (req, res) => {
+  TempOutfitterApplication.findOne({ where: { app_control_number: req.params.id } }).then(application => {
+    if (application) {
+      application.status = req.body.status;
+      if (application.status === 'Accepted') {
+        acceptTempOutfitterPermitApplication(application)
+          .then(response => {
+            application.controlNumber = response.controlNumber;
+            application
+              .save()
+              .then(() => {
+                res.status(200).json(translateFromDatabaseToClient(application));
+              })
+              .catch(error => {
+                res.status(500).json(error);
+              });
+          })
+          .catch(error => {
+            res.status(500).json(error);
+          });
+      } else {
+        application
+          .save()
+          .then(() => {
+            res.status(200).json(translateFromDatabaseToClient(application));
+          })
+          .catch(error => {
+            res.status(500).json(error);
+          });
+      }
+    } else {
+      res.status(404).send();
+    }
+  });
+};
+
+module.exports = tempOutfitter;
