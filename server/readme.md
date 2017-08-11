@@ -20,7 +20,9 @@ and on the command line as part of a command:
 The following environment variables are required:
 
 - `DATABASE_URL` in the format of `postgres://<user>:<pass>@localhost:<port>/<dbname>`
-- `VCAP_SERVICES` is a JSON object that contains details for accessing the middle layer api and Amazon S3 services. For running tests locally the values can be set to anything. One caveat is that the MIDDLE_LAYER_BASE_URL needs to end with a slash (`/`). A sample value for `VCAP_SERVICES` is: ```{
+- `VCAP_SERVICES` is a JSON object that contains details for accessing the middle layer api and Amazon S3 services. For running tests locally the values can be set to anything. One caveat is that the MIDDLE_LAYER_BASE_URL needs to end with a slash (`/`). A sample value for `VCAP_SERVICES` is: 
+  ```json
+{
   "user-provided": [
     {
       "credentials": {
@@ -48,7 +50,8 @@ The following environment variables are required:
     }
   ],
   "s3": [{ "credentials": { "bucket": "bucket_name" } }]
-}```
+}
+```
 
 ## Available commands
 
